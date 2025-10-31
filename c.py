@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# mms_premise_tracker.py — Premise key + robust LastDaily parsing + correct Next Action
+# mms_premise_tracker.py — Premise key + robust LastDaily parsing + safe summaries + Excel download
 
 import re
 import numpy as np
@@ -10,18 +10,18 @@ from io import BytesIO
 
 st.set_page_config(page_title="MMS | Premise Tracker", layout="wide")
 
-# ============== Helpers ==============
+# ================= Helpers =================
 def norm_col(c: str) -> str:
     return re.sub(r"\s+", " ", str(c).strip()).lower()
 
 def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    """يحاول إيجاد عمود بالاسم الدقيق أو بالاحتواء الجزئي (AR/EN)."""
     if df is None or df.empty:
         return None
     nm = {norm_col(c): c for c in df.columns}
     for c in candidates:
         if norm_col(c) in nm:
             return nm[norm_col(c)]
-    # loose contains
     for c in df.columns:
         for cand in candidates:
             if norm_col(cand) in norm_col(c):
@@ -29,7 +29,7 @@ def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 def smart_parse_datetime(series: pd.Series) -> pd.Series:
-    """Parse mixed text + Excel serials safely (Arabic/English)."""
+    """تحويل مختلط (نصي/سيريال Excel) إلى تواريخ؛ يدعم عربي/إنجليزي."""
     if series is None:
         return pd.Series([], dtype="datetime64[ns]")
     s = series.copy()
@@ -40,7 +40,7 @@ def smart_parse_datetime(series: pd.Series) -> pd.Series:
         x = str(x).strip()
         if x == "" or x.lower() in {"none", "nan", "null", "-", "—", "0"}:
             return np.nan
-        # بعض الملفات تضع 0000-00-00 أو ما شابه
+        # أشكال غير صالحة مثل 0000-00-00
         if re.fullmatch(r"0{2,}[-/:]0{2,}[-/:]0{2,}.*", x):
             return np.nan
         return x
@@ -59,19 +59,30 @@ def smart_parse_datetime(series: pd.Series) -> pd.Series:
             )
     return parsed
 
-def to_excel_download(df: pd.DataFrame, filename_prefix="premise_tracker_results") -> bytes:
-    """Create Excel bytes with openpyxl fallback if xlsxwriter missing."""
-    bio = BytesIO()
-    engine = "xlsxwriter"
+def as_int0(x):
+    """تحويل آمن إلى int؛ يعيد 0 عند NaN/None/قيمة غير رقمية."""
     try:
-        with pd.ExcelWriter(bio, engine=engine) as writer:
+        v = pd.to_numeric(x, errors="coerce")
+        if hasattr(v, "iloc"):
+            v = v.iloc[0]
+        if pd.isna(v):
+            return 0
+        return int(float(v))
+    except Exception:
+        return 0
+
+def to_excel_download(df: pd.DataFrame) -> bytes:
+    """إنشاء ملف Excel بالـ xlsxwriter وإن لم يتوفر فـ openpyxl."""
+    bio = BytesIO()
+    try:
+        with pd.ExcelWriter(bio, engine="xlsxwriter") as writer:
             df.to_excel(writer, index=False, sheet_name="Results")
     except ModuleNotFoundError:
         with pd.ExcelWriter(bio, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Results")
     return bio.getvalue()
 
-# ============== UI: Uploads ==============
+# ================= UI: Uploads =================
 st.title("📊 نظام تتبع العدادات غير المتصلة — Premise Tracker")
 
 with st.sidebar:
@@ -87,12 +98,12 @@ if not start_btn or not disconnected_file:
     st.info("⬆️ ارفع الملفات المطلوبة ثم اضغط **ابدأ التحليل**.")
     st.stop()
 
-# ============== Read disconnected (Premise key) ==============
+# ================= Read disconnected (Premise key) =================
 st.subheader("📘 قراءة ملف العدادات غير المتصلة (Premise = المفتاح)")
 
 dis_df = pd.read_excel(disconnected_file)
 
-# Premise في هذا الملف = Utility Site Id
+# Premise في غير المتصلين = Utility Site Id (حسب توجيهك)
 PREMISE_CANDS_DIS = ["Utility Site Id", "Premise", "رقم المكان"]
 LAST_CANDS = [
     "Last Daily", "LastDaily", "Last Communication", "Last Comm",
@@ -106,13 +117,13 @@ if not premise_col_dis:
     st.error("لم يتم العثور على عمود رقم المكان في ملف غير المتصلين (توقّع: Utility Site Id).")
     st.stop()
 
-# مفتاح موحد
+# مفتاح موحّد
 dis_df["_KEY_PREMISE"] = dis_df[premise_col_dis].astype(str).str.strip()
 
-# اختيار يدوي لعمود LastDaily (إن رغبت)
+# اختيار يدوي لعمود LastDaily (اختياري)
 with st.expander("🔧 اختيار عمود 'آخر اتصال' يدويًا (اختياري)"):
     last_choice = st.selectbox(
-        "اختر عمود 'آخر اتصال' (اختياري):",
+        "اختر عمود 'آخر اتصال' إن رغبت:",
         options=["(اكتشاف تلقائي)"] + list(dis_df.columns),
         index=0
     )
@@ -139,9 +150,9 @@ summary_base_cols = ["_KEY_PREMISE", "LastDaily"]
 summary_extra_cols = [c for c in dis_df.columns if c not in summary_base_cols]
 summary = dis_df[summary_base_cols + summary_extra_cols].copy()
 
-# ============== Read tasks (multi files) ==============
+# ================= Read tasks (multi files) =================
 def load_task_files(files, kind_label: str) -> pd.DataFrame:
-    """Normalize multiple files to a unified schema using Premise as key."""
+    """توحيد مخطط ملفات الفحص/الصيانة باستخدام Premise كمفتاح."""
     if not files:
         return pd.DataFrame()
 
@@ -149,6 +160,7 @@ def load_task_files(files, kind_label: str) -> pd.DataFrame:
     for f in files:
         df = pd.read_excel(f)
 
+        # Premise في ملفات الصيانة/الفحص = Premise (حسب توجيهك)
         premise_col = pick_col(df, ["Premise", "Utility Site Id", "رقم المكان"])
         reg_col     = pick_col(df, ["Task Registration Date Time", "Request Registration Date Time",
                                     "تاريخ التسجيل", "تاريخ تسجيل المهمة", "تاريخ تسجيل الطلب"])
@@ -165,10 +177,10 @@ def load_task_files(files, kind_label: str) -> pd.DataFrame:
 
         tmp = pd.DataFrame()
         tmp["_KEY_PREMISE"] = df[premise_col].astype(str).str.strip()
-        tmp["reg_time"]   = smart_parse_datetime(df[reg_col])   if reg_col   in df.columns else pd.NaT
-        tmp["close_time"] = smart_parse_datetime(df[close_col]) if close_col in df.columns else pd.NaT
-        tmp["status"]     = df[status_col].astype(str)          if status_col in df.columns else np.nan
-        tmp["result"]     = df[result_col].astype(str)          if result_col in df.columns else np.nan
+        tmp["reg_time"]   = smart_parse_datetime(df[reg_col])   if (reg_col   and reg_col   in df.columns) else pd.NaT
+        tmp["close_time"] = smart_parse_datetime(df[close_col]) if (close_col and close_col in df.columns) else pd.NaT
+        tmp["status"]     = df[status_col].astype(str)          if (status_col and status_col in df.columns) else np.nan
+        tmp["result"]     = df[result_col].astype(str)          if (result_col and result_col in df.columns) else np.nan
         tmp["bucket"]     = kind_label
         tmp["source"]     = getattr(f, "name", kind_label)
         frames.append(tmp)
@@ -180,31 +192,36 @@ def load_task_files(files, kind_label: str) -> pd.DataFrame:
 insp_df  = load_task_files(insp_files,  "فحص")
 maint_df = load_task_files(maint_files, "صيانة")
 
-# ============== Safe summaries ==============
+# ================= Safe summaries =================
+# تعريف كلمات/حالات الإقفال الشائعة (AR/EN)
 CLOSED_TERMS = {
     "closed", "complete", "completed", "done",
-    "مغلق", "مغلقه", "مقفلة", "مقفل", "منجز", "منتهية", "منتهي"
+    "مغلق", "مغلقة", "مقفلة", "مقفل", "منجز", "منجزة", "منتهية", "منتهي", "تمت المعالجة"
 }
 
 def summarize_tasks(df: pd.DataFrame, prefix: str) -> pd.DataFrame:
-    """Aggregate per Premise: total, open, latest status/result/date (safe)."""
+    """تجميع آمن لكل Premise: إجمالي، مفتوح، آخر حالة/نتيجة/تاريخ."""
     if df is None or df.empty or "_KEY_PREMISE" not in df.columns:
         return pd.DataFrame(columns=["_KEY_PREMISE"])
 
     df = df.copy()
 
+    # تأكد من الأعمدة الأساسية
     for col in ["reg_time", "close_time", "status", "result"]:
         if col not in df.columns:
             df[col] = pd.NaT if col in ["reg_time", "close_time"] else np.nan
 
-    # تعريف المفتوح: لا إقفال + حالة ليست ضمن حالات الإقفال المعروفة
+    # اعتبر المهمة مغلقة إذا:
+    # - لديها close_time غير فارغ، أو
+    # - status ضمن CLOSED_TERMS
     status_norm = df["status"].astype(str).str.strip().str.lower()
     likely_closed = status_norm.isin(CLOSED_TERMS) | df["close_time"].notna()
     df["_is_open"] = ~likely_closed
 
-    # أحدث سجل حسب (close_time ثم reg_time)
+    # أحدث تاريخ: close_time ثم reg_time
     df["_latest_date"] = df["close_time"].where(df["close_time"].notna(), df["reg_time"])
 
+    # أحدث سجل لكل Premise (حتى لو NaT نرتّب بحيث تأتي NaT أخيرًا)
     latest = (
         df.sort_values(["_KEY_PREMISE", "_latest_date", "reg_time"], na_position="last")
           .drop_duplicates("_KEY_PREMISE", keep="last")
@@ -234,14 +251,22 @@ maint_sum = summarize_tasks(maint_df, "maint_")
 summary = summary.merge(insp_sum,  on="_KEY_PREMISE", how="left")
 summary = summary.merge(maint_sum, on="_KEY_PREMISE", how="left")
 
-# إعادة تأكيد أن LastDaily نوعها تاريخ (بعض الدمج قد يعيدها كـ object)
+# تأكيد نوع LastDaily كـ datetime (قد يتحول object بعد الدمج)
 if "LastDaily" in summary.columns:
     summary["LastDaily"] = smart_parse_datetime(summary["LastDaily"])
 
-# ============== Next Action ==============
+# تحويل آمن للأعمدة الرقمية قبل حساب "Next Action"
+for col in ["insp_open", "maint_open", "insp_total", "maint_total"]:
+    if col in summary.columns:
+        summary[col] = pd.to_numeric(summary[col], errors="coerce").fillna(0).astype(int)
+
+# ================= Next Action =================
 def next_action(row):
-    insp_open  = int((row.get("insp_open",  0) or 0))
-    maint_open = int((row.get("maint_open", 0) or 0))
+    insp_open  = row["insp_open"]  if "insp_open"  in row.index else 0
+    maint_open = row["maint_open"] if "maint_open" in row.index else 0
+    insp_open  = as_int0(insp_open)
+    maint_open = as_int0(maint_open)
+
     if maint_open > 0:
         return "تسريع صيانة مفتوحة"
     if insp_open > 0:
@@ -250,14 +275,14 @@ def next_action(row):
 
 summary["Next Action"] = summary.apply(next_action, axis=1)
 
-# ============== KPIs ==============
+# ================= KPIs =================
 st.subheader("📈 مؤشرات عامة")
 c1, c2, c3 = st.columns(3)
 c1.metric("عدد العدادات غير المتصلة", f"{summary['_KEY_PREMISE'].nunique():,}")
 c2.metric("مهام فحص مفتوحة",        int(summary.get("insp_open",  pd.Series()).fillna(0).sum()))
 c3.metric("مهام صيانة مفتوحة",       int(summary.get("maint_open", pd.Series()).fillna(0).sum()))
 
-# ============== Table ==============
+# ================= Table =================
 st.subheader("📋 الجدول الموحد")
 display_cols = ["_KEY_PREMISE", "LastDaily"]
 for c in ["Office", "States", "Logistic State", "Gateway Id", "Latitude", "Longitude"]:
@@ -270,7 +295,7 @@ display_cols += [c for c in [
 
 st.dataframe(summary[display_cols] if display_cols else summary, use_container_width=True)
 
-# ============== Download (Excel) ==============
+# ================= Download (Excel) =================
 excel_bytes = to_excel_download(summary)
 st.download_button(
     label="⬇️ تنزيل النتائج (Excel)",
