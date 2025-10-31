@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-# mms_disconnected_deeptracker.py
+# mms_disconnected_deeptracker.py  (patched)
+
 import re
 import math
 import numpy as np
@@ -9,9 +10,7 @@ from datetime import datetime
 
 st.set_page_config(page_title="MMS | Disconnected Deep Tracker", layout="wide")
 
-# =========================
-# Helpers
-# =========================
+# ------------------ helpers ------------------
 def norm_col(c: str) -> str:
     return re.sub(r"\s+", " ", str(c).strip()).lower()
 
@@ -20,7 +19,6 @@ def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     for c in candidates:
         if norm_col(c) in nm:
             return nm[norm_col(c)]
-    # partial fallback
     for c in df.columns:
         for cand in candidates:
             if norm_col(cand) in norm_col(c):
@@ -33,8 +31,8 @@ def infer_bucket_from_name(name: str) -> str:
         "استبدال": ["استبدال"],
         "تحسين": ["تحسين", "استخراج", "تحسين واستخراج"],
         "صيانة": ["صيانة"],
-        "كشف": ["كشف", "معاينة", "كشف ومعاينة"],
-        "فحص": ["فحص", "inspection", "بور اوف", "power off"]
+        "كشف":   ["كشف", "معاينة", "كشف ومعاينة"],
+        "فحص":   ["فحص", "inspection", "بور اوف", "power off"]
     }
     for b, kws in hints.items():
         for kw in kws:
@@ -42,7 +40,7 @@ def infer_bucket_from_name(name: str) -> str:
                 return b
     return "غير محدد"
 
-# ---- Column candidate sets (AR/EN) ----
+# ---- candidate columns (AR/EN) ----
 # Disconnected
 DISC_METER_CANDS = ["HES Device Id", "Meter Number", "Meter No", "رقم العداد"]
 DISC_SITE_CANDS  = ["Utility Site Id", "Functional Location", "الموقع الوظيفي"]
@@ -62,9 +60,7 @@ RESULT_CANDS  = ["Technician's Result", "Final Result", "Final Result (Dispatche
 TYPE_CANDS    = ["Request Type", "نوع الطلب"]
 VIP_CANDS     = ["Subscription VIP", "VIP", "نوع المشترك", "Account Type", "تصنيف المشترك"]
 
-# =========================
-# Readers
-# =========================
+# ------------------ readers ------------------
 def read_disconnected(file):
     xl = pd.ExcelFile(file)
     sheet = xl.sheet_names[0]
@@ -79,7 +75,6 @@ def read_disconnected(file):
     if d_last:
         df[d_last] = pd.to_datetime(df[d_last], errors="coerce")
 
-    # Build keys
     df["_KEY_METER"] = df[d_meter].astype(str).str.strip() if d_meter else ""
     if d_site:
         df["_KEY_SITE"]  = df[d_site].astype(str).str.strip()
@@ -108,11 +103,9 @@ def read_tasks(file, is_inspection=False):
     if "Bucket" not in df.columns:
         df["Bucket"] = "فحص" if is_inspection else infer_bucket_from_name(getattr(file, "name", ""))
 
-    # open/closed
     is_closed = df[close_col].notna() if close_col else False
     df["__is_open__"] = ~is_closed if close_col else True
 
-    # keys
     df["_KEY_METER"] = df[meter_col].astype(str).str.strip() if meter_col else ""
     if funcloc_col:
         df["_KEY_SITE"]  = df[funcloc_col].astype(str).str.strip()
@@ -124,11 +117,9 @@ def read_tasks(file, is_inspection=False):
     )
     return df, meta
 
-# =========================
-# UI
-# =========================
+# ------------------ UI ------------------
 st.title("🔍 MMS — Disconnected × Inspections × Maintenance (Deep Tracker)")
-st.caption("تحليل دقيق وربط ثلاثي: العدادات غير المتصلة ↔ مهام الفحص ↔ مهام الصيانة، مع مقارنة تواريخ (قبل/بعد) آخر اتصال.")
+st.caption("تحليل دقيق وربط ثلاثي: العدادات غير المتصلة ↔ مهام الفحص ↔ مهام الصيانة، مع مقارنة قبل/بعد آخر اتصال.")
 
 with st.sidebar:
     st.header("📁 ملف العدادات غير المتصلة (إلزامي)")
@@ -149,13 +140,13 @@ if not dis_file:
     st.info("✨ ارفع ملف غير المتصلين أولاً.")
     st.stop()
 
-# Read disconnected
+# read disconnected
 dis_df, dis_meta = read_disconnected(dis_file)
 d_meter, d_site, d_last = dis_meta["d_meter"], dis_meta["d_site"], dis_meta["d_last"]
 st.success("تم تحميل ملف غير المتصلين ✅")
 st.write("**أعمدة مفاتيح غير المتصلين:**", {"Meter": d_meter, "Utility Site": d_site, "Last Daily": d_last})
 
-# Read inspections
+# read inspections
 insp_df = pd.DataFrame(); insp_metas = []
 if insp_files:
     tmp = []
@@ -165,7 +156,7 @@ if insp_files:
     insp_df = pd.concat(tmp, ignore_index=True, sort=False)
     st.success(f"تم تحميل ملفات الفحص: {len(insp_files)} ✅")
 
-# Read maintenance
+# read maintenance
 maint_df = pd.DataFrame(); maint_metas = []
 if maint_files:
     tmp = []
@@ -175,7 +166,7 @@ if maint_files:
     maint_df = pd.concat(tmp, ignore_index=True, sort=False)
     st.success(f"تم تحميل ملفات الصيانة: {len(maint_files)} ✅")
 
-# Resolve columns
+# resolve cols
 getcol = lambda metas, key: next((m[key] for m in metas if m.get(key)), None) if metas else None
 i_meter = getcol(insp_metas, "meter_col")
 i_reg   = getcol(insp_metas, "reg_col")
@@ -189,20 +180,23 @@ m_close = getcol(maint_metas, "close_col")
 m_status= getcol(maint_metas, "status_col")
 m_result= getcol(maint_metas, "result_col")
 
-# =========================
-# Summary builders
-# =========================
-def summarize_inspections(df):
-    if df.empty: 
-        return pd.DataFrame(columns=["_KEY_METER","insp_total","insp_open","insp_latest_result","insp_latest_date","insp_any_before_last","insp_any_after_last"])
-    # latest dates
-    latest_sort = df[i_close] if (i_close and i_close in df.columns) else df[i_reg] if (i_reg and i_reg in df.columns) else None
-    if latest_sort is not None:
-        df["_latest_sort"] = pd.to_datetime(latest_sort, errors="coerce")
-    else:
-        df["_latest_sort"] = pd.NaT
+# ------------- optional site→meter fallback -------------
+if join_on_site and d_site:
+    if not insp_df.empty and "_KEY_METER" in insp_df.columns and insp_df["_KEY_METER"].eq("").any() and "_KEY_SITE" in insp_df.columns:
+        site_to_meter = dis_df[[d_site, "_KEY_METER"]].dropna().drop_duplicates().set_index(d_site)["_KEY_METER"]
+        insp_df.loc[insp_df["_KEY_METER"].eq("") & insp_df["_KEY_SITE"].notna(), "_KEY_METER"] = insp_df["_KEY_SITE"].map(site_to_meter).fillna("")
+    if not maint_df.empty and "_KEY_METER" in maint_df.columns and maint_df["_KEY_METER"].eq("").any() and "_KEY_SITE" in maint_df.columns:
+        site_to_meter = dis_df[[d_site, "_KEY_METER"]].dropna().drop_duplicates().set_index(d_site)["_KEY_METER"]
+        maint_df.loc[maint_df["_KEY_METER"].eq("") & maint_df["_KEY_SITE"].notna(), "_KEY_METER"] = maint_df["_KEY_SITE"].map(site_to_meter).fillna("")
 
-    # open
+# ---------------- summaries ----------------
+def summarize_inspections(df):
+    if df.empty:
+        return pd.DataFrame(columns=["_KEY_METER","insp_total","insp_open","insp_latest_result","insp_latest_date"])
+    latest_sort = df[i_close] if (i_close and i_close in df.columns) else df[i_reg] if (i_reg and i_reg in df.columns) else None
+    if latest_sort is not None: df["_latest_sort"] = pd.to_datetime(latest_sort, errors="coerce")
+    else: df["_latest_sort"] = pd.NaT
+
     if i_close and i_close in df.columns:
         open_mask = df[i_close].isna()
     elif i_status and i_status in df.columns:
@@ -214,27 +208,24 @@ def summarize_inspections(df):
     out = grp.size().reset_index(name="insp_total")
     out = out.merge(df[open_mask].groupby("_KEY_METER").size().rename("insp_open"),
                     how="left", left_on="_KEY_METER", right_index=True)
+
     latest = df.sort_values("_latest_sort").groupby("_KEY_METER").tail(1)
-    show_cols = ["_KEY_METER"]
-    if i_result and i_result in latest.columns: show_cols.append(i_result)
-    show_cols += [c for c in [i_reg, i_close] if c and c in latest.columns]
-    latest = latest[show_cols]
-    latest = latest.rename(columns={i_result: "insp_latest_result", i_reg: "insp_reg", i_close:"insp_close"})
+    cols = ["_KEY_METER"]
+    if i_result and i_result in latest.columns: cols.append(i_result)
+    if i_reg and i_reg in latest.columns: cols.append(i_reg)
+    if i_close and i_close in latest.columns: cols.append(i_close)
+    latest = latest[cols].rename(columns={i_result:"insp_latest_result", i_reg:"insp_reg", i_close:"insp_close"})
     latest["insp_latest_date"] = latest["insp_close"].fillna(latest["insp_reg"])
     out = out.merge(latest, how="left", on="_KEY_METER")
     return out
 
 def summarize_maintenance(df):
     if df.empty:
-        return pd.DataFrame(columns=["_KEY_METER","mnt_total","mnt_open","mnt_latest_status","mnt_latest_bucket","mnt_latest_date","mnt_any_before_last","mnt_any_after_last"])
-    # latest dates
+        return pd.DataFrame(columns=["_KEY_METER","mnt_total","mnt_open","mnt_latest_status","mnt_latest_bucket","mnt_latest_date"])
     latest_sort = df[m_close] if (m_close and m_close in df.columns) else df[m_reg] if (m_reg and m_reg in df.columns) else None
-    if latest_sort is not None:
-        df["_latest_sort"] = pd.to_datetime(latest_sort, errors="coerce")
-    else:
-        df["_latest_sort"] = pd.NaT
+    if latest_sort is not None: df["_latest_sort"] = pd.to_datetime(latest_sort, errors="coerce")
+    else: df["_latest_sort"] = pd.NaT
 
-    # open tasks
     if m_close and m_close in df.columns:
         open_mask = df[m_close].isna()
     elif m_status and m_status in df.columns:
@@ -250,100 +241,76 @@ def summarize_maintenance(df):
     latest = df.sort_values("_latest_sort").groupby("_KEY_METER").tail(1)
     cols = ["_KEY_METER"]
     if m_status and m_status in latest.columns: cols.append(m_status)
-    cols += ["Bucket"] if "Bucket" in latest.columns else []
-    cols += [c for c in [m_reg, m_close] if c and c in latest.columns]
-    latest = latest[cols]
-    latest = latest.rename(columns={m_status:"mnt_latest_status", m_reg:"mnt_reg", m_close:"mnt_close", "Bucket":"mnt_latest_bucket"})
+    if "Bucket" in latest.columns: cols.append("Bucket")
+    if m_reg and m_reg in latest.columns: cols.append(m_reg)
+    if m_close and m_close in latest.columns: cols.append(m_close)
+    latest = latest[cols].rename(columns={m_status:"mnt_latest_status", "Bucket":"mnt_latest_bucket", m_reg:"mnt_reg", m_close:"mnt_close"})
     latest["mnt_latest_date"] = latest["mnt_close"].fillna(latest["mnt_reg"])
     out = out.merge(latest, how="left", on="_KEY_METER")
     return out
 
-# =========================
-# Build core keys on tasks if meter miss & join_on_site
-# =========================
-if join_on_site and d_site:
-    if not insp_df.empty and "_KEY_METER" in insp_df.columns and insp_df["_KEY_METER"].eq("").any() and "_KEY_SITE" in insp_df.columns:
-        # fallback: map site to meter using disconnected data
-        site_to_meter = dis_df[[d_site, "_KEY_METER"]].dropna().drop_duplicates().set_index(d_site)["_KEY_METER"]
-        insp_df.loc[insp_df["_KEY_METER"].eq("") & insp_df["_KEY_SITE"].notna(), "_KEY_METER"] = insp_df["_KEY_SITE"].map(site_to_meter).fillna("")
-    if not maint_df.empty and "_KEY_METER" in maint_df.columns and maint_df["_KEY_METER"].eq("").any() and "_KEY_SITE" in maint_df.columns:
-        site_to_meter = dis_df[[d_site, "_KEY_METER"]].dropna().drop_duplicates().set_index(d_site)["_KEY_METER"]
-        maint_df.loc[maint_df["_KEY_METER"].eq("") & maint_df["_KEY_SITE"].notna(), "_KEY_METER"] = maint_df["_KEY_SITE"].map(site_to_meter).fillna("")
-
-# =========================
-# Summaries
-# =========================
 insp_sum  = summarize_inspections(insp_df) if not insp_df.empty else pd.DataFrame(columns=["_KEY_METER"])
 maint_sum = summarize_maintenance(maint_df) if not maint_df.empty else pd.DataFrame(columns=["_KEY_METER"])
 
-# Merge onto disconnected
 summary = dis_df.copy()
 summary = summary.merge(insp_sum,  how="left", on="_KEY_METER")
 summary = summary.merge(maint_sum, how="left", on="_KEY_METER")
 
-# =========================
-# Before/After Last Daily flags
-# =========================
-def compare_to_last(df, time_col, last_col):
-    if (time_col is None) or (last_col is None) or (time_col not in df.columns) or (last_col not in df.columns):
-        return pd.Series([np.nan]*len(df))
-    t = pd.to_datetime(df[time_col], errors="coerce")
-    l = pd.to_datetime(df[last_col], errors="coerce")
-    # -1: before, 0: equal/unknown, +1: after
-    return np.where(t.notna() & l.notna(), np.sign((t - l).dt.total_seconds()), np.nan)
-
-# للإحصاء “هل حصل أي حدث قبل/بعد آخر اتصال؟” نحتاج أدنى/أقصى تواريخ على مستوى العداد:
-def any_event_relative(tasks_df, key_col, reg_col, close_col, dis_last_series):
-    if tasks_df.empty: 
+# --------- any_event_relative (clean) ---------
+def any_event_relative(tasks_df, key_col, reg_col, close_col, last_series):
+    if tasks_df is None or tasks_df.empty or key_col not in tasks_df.columns:
         return pd.DataFrame(columns=[key_col, "any_before_last", "any_after_last"])
-    # تواريخ محتملة للأحداث: التسجيل/الإقفال
-    tdf = tasks_df.copy()
-    tdf["_EVENT_DATE"] = pd.NaT
-    if close_col and close_col in tdf.columns:
-        tdf["_EVENT_DATE"] = pd.to_datetime(tdf[close_col], errors="coerce")
-    if reg_col and reg_col in tdf.columns:
-        # خذ الأقدم/الأحدث لاحقًا، لكن الآن سنسقط الاثنين ونستخرج min/max
-        tdf["_REG_DATE__"] = pd.to_datetime(tdf[reg_col], errors="coerce")
+    if reg_col and reg_col in tasks_df.columns:
+        t_reg = pd.to_datetime(tasks_df[reg_col], errors="coerce")
+    else:
+        t_reg = pd.Series(pd.NaT, index=tasks_df.index)
+    if close_col and close_col in tasks_df.columns:
+        t_close = pd.to_datetime(tasks_df[close_col], errors="coerce")
+    else:
+        t_close = pd.Series(pd.NaT, index=tasks_df.index)
 
-    agg = tdf.groupby("_KEY_METER").agg(
-        min_event=(" _EVENT_DATE", lambda s: pd.to_datetime(s, errors="coerce").min()) if "_EVENT_DATE" in tdf.columns else ("_EVENT_DATE", "min"),
-        max_event=(" _EVENT_DATE", lambda s: pd.to_datetime(s, errors="coerce").max()) if "_EVENT_DATE" in tdf.columns else ("_EVENT_DATE", "max"),
-        min_reg=(" _REG_DATE__", lambda s: pd.to_datetime(s, errors="coerce").min()) if "_REG_DATE__" in tdf.columns else ("_REG_DATE__", "min"),
-        max_reg=(" _REG_DATE__", lambda s: pd.to_datetime(s, errors="coerce").max()) if "_REG_DATE__" in tdf.columns else ("_REG_DATE__", "max"),
-    )
-    # أعمدة قد تبدو غير دقيقة بالمسافات؛ نصلحها:
-    cols_rename = {}
-    for c in list(agg.columns):
-        cols_rename[c] = c.replace(" _", "_")
-    agg = agg.rename(columns=cols_rename)
+    event_min = pd.concat([t_close, t_reg], axis=1).min(axis=1)
+    event_max = pd.concat([t_close, t_reg], axis=1).max(axis=1)
 
-    # اختر تواريخ مقارنة (نأخذ أي تاريخ متاح)
-    agg["earliest"] = agg[["min_event","min_reg"]].min(axis=1)
-    agg["latest"]   = agg[["max_event","max_reg"]].max(axis=1)
+    agg = pd.DataFrame({
+        key_col: tasks_df[key_col],
+        "_min": event_min,
+        "_max": event_max
+    }).groupby(key_col).agg(earliest=("_min","min"), latest=("_max","max")).reset_index()
 
-    out = agg[["earliest","latest"]].copy()
-    out = out.join(dis_last_series.rename("LastDaily"), how="left")
-    out["any_before_last"] = (out["earliest"].notna()) & (out["LastDaily"].notna()) & (out["earliest"] < out["LastDaily"])
-    out["any_after_last"]  = (out["latest"].notna())   & (out["LastDaily"].notna()) & (out["latest"]  > out["LastDaily"])
-    out = out.reset_index().rename(columns={"index":"_KEY_METER"})
-    return out[["_KEY_METER","any_before_last","any_after_last"]]
+    last_df = last_series.rename("LastDaily").reset_index()
+    last_df.columns = [key_col, "LastDaily"]
+    out = agg.merge(last_df, how="left", on=key_col)
+    out["any_before_last"] = out["earliest"].notna() & out["LastDaily"].notna() & (out["earliest"] < out["LastDaily"])
+    out["any_after_last"]  = out["latest"].notna()   & out["LastDaily"].notna() & (out["latest"]  > out["LastDaily"])
+    return out[[key_col, "any_before_last", "any_after_last"]]
 
-# سلاسل “آخر اتصال” على مستوى العداد
 last_series = summary.set_index("_KEY_METER")[d_last] if d_last else pd.Series(dtype="datetime64[ns]")
 
 insp_rel  = any_event_relative(insp_df, "_KEY_METER", i_reg, i_close, last_series)  if not insp_df.empty else pd.DataFrame(columns=["_KEY_METER","any_before_last","any_after_last"])
 maint_rel = any_event_relative(maint_df, "_KEY_METER", m_reg, m_close, last_series) if not maint_df.empty else pd.DataFrame(columns=["_KEY_METER","any_before_last","any_after_last"])
 
-summary = summary.merge(insp_rel.add_prefix("insp_") if len(insp_rel) else insp_rel,
-                        how="left", left_on="_KEY_METER", right_on="insp__KEY_METER").drop(columns=["insp__KEY_METER"], errors="ignore")
-summary = summary.merge(maint_rel.add_prefix("mnt_") if len(maint_rel) else maint_rel,
-                        how="left", left_on="_KEY_METER", right_on="mnt__KEY_METER").drop(columns=["mnt__KEY_METER"], errors="ignore")
+# --------- SAFE MERGES to avoid KeyError ---------
+def safe_merge_relative(base: pd.DataFrame, rel_df: pd.DataFrame, prefix: str) -> pd.DataFrame:
+    if rel_df is None or not isinstance(rel_df, pd.DataFrame) or rel_df.empty:
+        return base
+    if "_KEY_METER" not in rel_df.columns:
+        return base
+    rel_pref = rel_df.add_prefix(prefix)  # e.g. insp_any_before_last
+    # add_prefix سيجعل المفتاح: 'insp__KEY_METER'
+    key_col = f"{prefix}__KEY_METER"
+    if key_col not in rel_pref.columns:
+        key_col = f"{prefix}_KEY_METER"  # احتياط
+    if key_col not in rel_pref.columns:
+        return base
+    rel_pref = rel_pref.rename(columns={key_col: "_KEY_METER"})
+    return base.merge(rel_pref, how="left", on="_KEY_METER")
 
-# =========================
-# Next Action classification
-# =========================
+summary = safe_merge_relative(summary, insp_rel, "insp_")
+summary = safe_merge_relative(summary, maint_rel, "mnt_")
+
+# ------------- next action -------------
 def next_action(row):
-    # أولوية: صيانة مفتوحة > فحص مفتوح > افتح فحص جديد
     mnt_open = (row.get("mnt_open", 0) or 0) > 0
     insp_open= (row.get("insp_open",0) or 0) > 0
     if mnt_open: return "تسريع صيانة مفتوحة"
@@ -352,108 +319,95 @@ def next_action(row):
 
 summary["Next Action"] = summary.apply(next_action, axis=1)
 
-# =========================
-# KPIs
-# =========================
+# ---------------- KPIs ----------------
 st.markdown("## 📊 مؤشرات عامة")
 k1,k2,k3,k4 = st.columns(4)
 k1.metric("عدادات غير متصلة", f"{summary['_KEY_METER'].nunique():,}")
-k2.metric("لها فحص مفتوح", f"{int(summary['insp_open'].fillna(0).gt(0).sum()) if 'insp_open' in summary.columns else 0:,}")
-k3.metric("لها صيانة مفتوحة", f"{int(summary['mnt_open'].fillna(0).gt(0).sum()) if 'mnt_open' in summary.columns else 0:,}")
-k4.metric("تجاوز SLA (إرشادي)", f"{sla_days} يوم")
+k2.metric("لها فحص مفتوح", f"{int(summary.get('insp_open', pd.Series()).fillna(0).gt(0).sum()):,}")
+k3.metric("لها صيانة مفتوحة", f"{int(summary.get('mnt_open', pd.Series()).fillna(0).gt(0).sum()):,}")
+k4.metric("SLA التوجيهي", f"{sla_days} يوم")
 
-# =========================
-# Unified table
-# =========================
+# ------------- unified table -------------
 st.markdown("## 📋 الجدول الموحد لكل عداد")
 display_cols = []
-
-# من disconnected
 for c in [d_meter, d_site, d_last, "Office", "States", "Logistic State", "Gateway Id", "Latitude", "Longitude"]:
     if c and c in summary.columns: display_cols.append(c)
-
-# مؤشرات الفحص
 display_cols += ["insp_total","insp_open","insp_latest_result","insp_latest_date","insp_any_before_last","insp_any_after_last"]
-# مؤشرات الصيانة
 display_cols += ["mnt_total","mnt_open","mnt_latest_status","mnt_latest_bucket","mnt_latest_date","mnt_any_before_last","mnt_any_after_last"]
-# الإجراء القادم
 display_cols += ["Next Action"]
-
 display_cols = [c for c in display_cols if c in summary.columns]
-st.dataframe(summary[display_cols].sort_values(["Next Action","mnt_open","insp_open"], ascending=[True, False, False]), use_container_width=True)
+
+st.dataframe(summary[display_cols].sort_values(["Next Action",
+                                                "mnt_open" if "mnt_open" in summary.columns else display_cols[0],
+                                                "insp_open" if "insp_open" in summary.columns else display_cols[0]],
+                                               ascending=[True, False, False]),
+             use_container_width=True)
 
 st.markdown("---")
 st.markdown("### تفريغ القوائم حسب الإجراء القادم")
 col_a, col_b, col_c = st.columns(3)
+accel = summary[summary["Next Action"]=="تسريع صيانة مفتوحة"][display_cols]
+follow= summary[summary["Next Action"]=="متابعة فحص مفتوح"][display_cols]
+create= summary[summary["Next Action"]=="يفتح فحص جديد"][display_cols]
 with col_a:
     st.markdown("**تسريع صيانة مفتوحة**")
-    accel = summary[summary["Next Action"]=="تسريع صيانة مفتوحة"][display_cols]
     st.dataframe(accel, use_container_width=True)
 with col_b:
     st.markdown("**متابعة فحص مفتوح**")
-    follow = summary[summary["Next Action"]=="متابعة فحص مفتوح"][display_cols]
     st.dataframe(follow, use_container_width=True)
 with col_c:
     st.markdown("**يفتح فحص جديد**")
-    create = summary[summary["Next Action"]=="يفتح فحص جديد"][display_cols]
     st.dataframe(create, use_container_width=True)
 
-# =========================
-# Optional timelines (per meter)
-# =========================
+# -------- optional simple timeline per meter --------
 st.markdown("---")
 st.markdown("## ⏱️ عرض زمني (اختياري) — اختر عدادًا")
-sel_meter = st.selectbox("اختر عداد لعرض التسلسل الزمني", options=summary["_KEY_METER"].dropna().unique().tolist())
+sel_meter = st.selectbox("اختر عداد", options=summary["_KEY_METER"].dropna().unique().tolist())
+def _events(df, km, reg, close, t_reg_name, t_close_name, label):
+    ev = []
+    if df.empty or km not in df.columns: return ev
+    tmp = df[df[km]==sel_meter].copy()
+    if reg and reg in tmp.columns:
+        tmp["__reg"] = pd.to_datetime(tmp[reg], errors="coerce")
+        for d in tmp["__reg"].dropna():
+            ev.append({"when": d, "type": f"{label}-Reg", "desc": t_reg_name})
+    if close and close in tmp.columns:
+        tmp["__close"] = pd.to_datetime(tmp[close], errors="coerce")
+        for d in tmp["__close"].dropna():
+            ev.append({"when": d, "type": f"{label}-Close", "desc": t_close_name})
+    return ev
+
 if sel_meter:
     events = []
-    # last daily
     if d_last and d_last in summary.columns:
         ld = summary.loc[summary["_KEY_METER"]==sel_meter, d_last].iloc[0]
         events.append({"when": ld, "type": "LastDaily", "desc": "آخر اتصال"})
-
-    # inspection events
-    if not insp_df.empty and "_KEY_METER" in insp_df.columns:
-        tmp = insp_df[insp_df["_KEY_METER"]==sel_meter].copy()
-        if i_reg:   tmp["__when_reg"]   = pd.to_datetime(tmp[i_reg], errors="coerce")
-        if i_close: tmp["__when_close"] = pd.to_datetime(tmp[i_close], errors="coerce")
-        for _, r in tmp.iterrows():
-            if i_reg and pd.notna(r["__when_reg"]):
-                events.append({"when": r["__when_reg"], "type":"Inspection-Reg", "desc":"تسجيل فحص"})
-            if i_close and pd.notna(r["__when_close"]):
-                events.append({"when": r["__when_close"], "type":"Inspection-Close", "desc":"إقفال فحص"})
-
-    # maintenance events
-    if not maint_df.empty and "_KEY_METER" in maint_df.columns:
-        tmp = maint_df[maint_df["_KEY_METER"]==sel_meter].copy()
-        if m_reg:   tmp["__when_reg"]   = pd.to_datetime(tmp[m_reg], errors="coerce")
-        if m_close: tmp["__when_close"] = pd.to_datetime(tmp[m_close], errors="coerce")
-        for _, r in tmp.iterrows():
-            if m_reg and pd.notna(r["__when_reg"]):
-                events.append({"when": r["__when_reg"], "type":"Maint-Reg", "desc":"تسجيل صيانة"})
-            if m_close and pd.notna(r["__when_close"]):
-                events.append({"when": r["__when_close"], "type":"Maint-Close", "desc":"إقفال صيانة"})
-
+    events += _events(insp_df, "_KEY_METER", i_reg, i_close, "تسجيل فحص", "إقفال فحص", "Inspection")
+    events += _events(maint_df, "_KEY_METER", m_reg, m_close, "تسجيل صيانة", "إقفال صيانة", "Maintenance")
     ev = pd.DataFrame(events)
     if not ev.empty:
-        ev = ev.sort_values("when")
-        st.dataframe(ev, use_container_width=True)
+        st.dataframe(ev.sort_values("when"), use_container_width=True)
     else:
         st.info("لا توجد أحداث زمنيّة لهذا العداد.")
 
-# =========================
-# Downloads
-# =========================
+# ---------------- downloads ----------------
 st.markdown("---")
 dl1, dl2, dl3 = st.columns(3)
 with dl1:
-    st.download_button("⬇️ تنزيل الجدول الموحد (CSV)", data=summary.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="disconnected_deeptracker_summary.csv", mime="text/csv")
+    st.download_button("⬇️ تنزيل الجدول الموحد (CSV)",
+                       data=summary.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="disconnected_deeptracker_summary.csv",
+                       mime="text/csv")
 with dl2:
-    st.download_button("⬇️ تسريع صيانة مفتوحة (CSV)", data=accel.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="accelerate_open_maintenance.csv", mime="text/csv")
+    st.download_button("⬇️ تسريع صيانة مفتوحة (CSV)",
+                       data=accel.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="accelerate_open_maintenance.csv",
+                       mime="text/csv")
 with dl3:
-    st.download_button("⬇️ يفتح فحص جديد (CSV)", data=create.to_csv(index=False).encode("utf-8-sig"),
-                       file_name="create_new_inspection.csv", mime="text/csv")
+    st.download_button("⬇️ يفتح فحص جديد (CSV)",
+                       data=create.to_csv(index=False).encode("utf-8-sig"),
+                       file_name="create_new_inspection.csv",
+                       mime="text/csv")
 
 st.markdown("---")
-st.caption("MMS — Disconnected Deep Tracker: ربط وتحليل ثلاثي مع مقارنة قبل/بعد Last Daily، وتتبع شامل للحالة.")
+st.caption("MMS — Disconnected Deep Tracker (Patched): دمج آمن، مؤشرات قبل/بعد آخر اتصال، وتتبع شامل.")
