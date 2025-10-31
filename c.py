@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # inspection_performance_suite.py
-# Unified app to showcase Inspection efforts & outcomes, tie to Maintenance, and connection status (disconnected list).
-# Premise/Utility Site Id is the join key. Robust date parsing. Multi-file uploads. Multi-tab analytics. Excel exports.
+# Unified Streamlit app to showcase Inspection efforts, tie to Maintenance, and use Disconnected list.
+# Key = Premise / Utility Site Id. Robust date parsing. Multi-file uploads. Multi-tab analytics. Excel exports.
 
 import re
 import numpy as np
@@ -18,14 +18,13 @@ def norm_col(c: str) -> str:
     return re.sub(r"\s+", " ", str(c).strip()).lower()
 
 def pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    """Find a column by exact normalized name or contains (AR/EN)."""
+    """Find a column by exact normalized name or by containment (AR/EN)."""
     if df is None or df.empty:
         return None
     nm = {norm_col(c): c for c in df.columns}
     for c in candidates:
         if norm_col(c) in nm:
             return nm[norm_col(c)]
-    # loose contains
     for c in df.columns:
         for cand in candidates:
             if norm_col(cand) in norm_col(c):
@@ -42,18 +41,18 @@ def smart_parse_datetime(series: pd.Series, excel_origin: str = "1899-12-30") ->
         if pd.isna(x): return np.nan
         x = str(x).strip()
         if x == "" or x.lower() in {"none", "nan", "null", "-", "—", "0"}: return np.nan
-        # e.g., 0000-00-00
         if re.fullmatch(r"0{2,}[-/:]0{2,}[-/:]0{2,}.*", x): return np.nan
         return x
 
     s = s.map(clean)
 
     parsed = pd.to_datetime(s, errors="coerce", dayfirst=True, infer_datetime_format=True)
-
+    # try again month-first
     need2 = parsed.isna()
     if need2.any():
         parsed.loc[need2] = pd.to_datetime(s[need2], errors="coerce", dayfirst=False, infer_datetime_format=True)
 
+    # Excel serial fallback
     need_excel = parsed.isna()
     if need_excel.any():
         as_num = pd.to_numeric(s.where(need_excel), errors="coerce")
@@ -87,11 +86,36 @@ def infer_bucket_from_name(name: str, kind_label: str) -> str:
     if any(k in n for k in ["كشف", "معاينة"]): return "كشف/معاينة"
     return kind_label
 
-def safe_int(s):
-    try:
-        return pd.to_numeric(s, errors="coerce").fillna(0).astype(int)
-    except Exception:
-        return s
+def normalize_task_flags(df: pd.DataFrame, closed_terms: set[str]) -> pd.DataFrame:
+    """Ensure required cols exist + compute open/last flags."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["_KEY_PREMISE","reg_time","close_time","status","result","bucket","source","_is_open","_last"])
+    d = df.copy()
+    for col in ["reg_time","close_time"]:
+        if col not in d.columns:
+            d[col] = pd.NaT
+    for col in ["status","result","bucket","source"]:
+        if col not in d.columns:
+            d[col] = np.nan
+    status_norm = d["status"].astype(str).str.strip().str.lower()
+    is_closed_by_status = status_norm.isin(closed_terms)
+    is_closed_by_time   = d["close_time"].notna()
+    d["_is_open"] = ~(is_closed_by_status | is_closed_by_time)
+    d["_last"]    = d["close_time"].fillna(d["reg_time"])
+    return d
+
+def safe_hist_bar(series, bins=10, title=None):
+    """Streamlit-safe histogram (no IntervalIndex)."""
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        st.info("لا توجد بيانات كافية للرسم.")
+        return
+    counts, edges = np.histogram(s, bins=bins)
+    labels = [f"{int(np.floor(edges[i]))}–{int(np.ceil(edges[i+1]))}" for i in range(len(edges)-1)]
+    hist_df = pd.DataFrame({"bin": labels, "count": counts})
+    if title:
+        st.markdown(f"#### {title}")
+    st.bar_chart(hist_df.set_index("bin"))
 
 # ------------------------ Sidebar (Inputs & Settings) ------------------------
 st.title("📊 Inspection Performance Suite — Premise Key")
@@ -199,24 +223,7 @@ def load_task_files(files, kind_label: str) -> pd.DataFrame:
 insp_df = load_task_files(insp_files, "فحص")
 mnt_df  = load_task_files(mnt_files,  "صيانة")
 
-# ------------------------ Guard columns & types ------------------------
-def normalize_task_flags(df: pd.DataFrame, closed_terms: set[str]) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["_KEY_PREMISE","reg_time","close_time","status","result","bucket","source","_is_open","_last"])
-    d = df.copy()
-    for col in ["reg_time","close_time"]:
-        if col not in d.columns:
-            d[col] = pd.NaT
-    for col in ["status","result","bucket","source"]:
-        if col not in d.columns:
-            d[col] = np.nan
-    status_norm = d["status"].astype(str).str.strip().str.lower()
-    is_closed_by_status = status_norm.isin(closed_terms)
-    is_closed_by_time   = d["close_time"].notna()
-    d["_is_open"] = ~(is_closed_by_status | is_closed_by_time)
-    d["_last"]    = d["close_time"].fillna(d["reg_time"])
-    return d
-
+# Normalize flags
 insp_df = normalize_task_flags(insp_df, CLOSED_TERMS)
 mnt_df  = normalize_task_flags(mnt_df,  CLOSED_TERMS)
 
@@ -257,8 +264,9 @@ base["insp_done"]  = base["insp_close"].notna()
 base["has_mnt"]    = base["mnt_first_reg"].notna()
 base["mnt_open"]   = base["has_mnt"] & ~base["mnt_closed"].fillna(False)
 
-# Days between last inspection close and first maintenance reg
+# Days between last inspection close and first maintenance reg (no negatives)
 base["days_from_insp_to_mnt"] = (base["mnt_first_reg"] - base["insp_close"]).dt.days
+base.loc[base["days_from_insp_to_mnt"] < 0, "days_from_insp_to_mnt"] = np.nan
 
 # ------------------------ Aggregations (counts per premise) ------------------------
 def per_premise_rollup(insp_df: pd.DataFrame, mnt_df: pd.DataFrame, dis_df: pd.DataFrame) -> pd.DataFrame:
@@ -291,7 +299,6 @@ def per_premise_rollup(insp_df: pd.DataFrame, mnt_df: pd.DataFrame, dis_df: pd.D
             mnt_last_date=("_last_date", "max")
         ).reset_index()
         mnt_by["mnt_closed"] = mnt_by["mnt_cnt"] - mnt_by["mnt_open"]
-        # last status by last date
         _m_sorted = _m.sort_values(["_KEY_PREMISE","_last_date","reg_time"], na_position="last")
         last_idx = _m_sorted.groupby("_KEY_PREMISE").tail(1).index
         last_slice = _m_sorted.loc[last_idx, ["_KEY_PREMISE","status"]].rename(columns={"status":"mnt_last_status"})
@@ -301,7 +308,6 @@ def per_premise_rollup(insp_df: pd.DataFrame, mnt_df: pd.DataFrame, dis_df: pd.D
     per_p = dis_df[["_KEY_PREMISE","LastDaily"]].drop_duplicates()
     per_p = per_p.merge(insp_by, on="_KEY_PREMISE", how="left").merge(mnt_by, on="_KEY_PREMISE", how="left")
 
-    # typing
     for col in ["insp_cnt","insp_open","insp_closed","mnt_cnt","mnt_open","mnt_closed"]:
         if col in per_p.columns:
             per_p[col] = pd.to_numeric(per_p[col], errors="coerce").fillna(0).astype(int)
@@ -325,7 +331,6 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
 with tab1:
     st.subheader("🧰 جهود الفحص (Inspection Efforts)")
 
-    # KPIs
     total_disconnected = dis_df["_KEY_PREMISE"].nunique()
     insp_done_count    = int(base["insp_done"].sum())
     insp_rate          = (insp_done_count / total_disconnected * 100.0) if total_disconnected else 0.0
@@ -337,11 +342,9 @@ with tab1:
     k2.metric("تم فحصها (Premise)", f"{insp_done_count:,}", f"{insp_rate:.1f}%")
     k3.metric("متوسط مدة الفحص (يوم)", f"{avg_insp_days:.1f}")
 
-    # Time trend of inspections (by reg_time or close_time)
     st.markdown("### الاتجاه الزمني للفحوص")
     if not insp_df.empty:
         i_trend = insp_df.copy()
-        # prefer close_time else reg_time
         i_trend["t"] = i_trend["close_time"].fillna(i_trend["reg_time"])
         i_trend = i_trend.dropna(subset=["t"])
         i_trend["day"] = i_trend["t"].dt.date
@@ -351,7 +354,6 @@ with tab1:
     else:
         st.info("لا توجد بيانات فحص لعرض الاتجاه الزمني.")
 
-    # Technicians or status/result distribution if available
     st.markdown("### أكثر نتائج الفحص تكرارًا")
     if "result" in insp_df.columns and not insp_df.empty:
         top_res = (insp_df["result"].astype(str)
@@ -367,13 +369,8 @@ with tab1:
 with tab2:
     st.subheader("🔗 متابعة ما بعد الفحص (مسؤولية الصيانة)")
 
-    # 1) inspected but no maintenance
     r1 = base[(base["insp_done"]) & (~base["has_mnt"])].copy().sort_values(["insp_close"], ascending=[False])
-
-    # 2) maintenance closed but still disconnected (present in disconnected list)
     r2 = base[(base["insp_done"]) & (base["has_mnt"]) & (base["mnt_closed"])].copy().sort_values(["mnt_last_close","mnt_last_reg"], ascending=[False, False])
-
-    # 3) maintenance open after inspection
     r3 = base[(base["insp_done"]) & (base["mnt_open"])].copy().sort_values(["mnt_last_reg"], ascending=[False])
 
     c1, c2, c3 = st.columns(3)
@@ -399,42 +396,82 @@ with tab2:
 with tab3:
     st.subheader("🔌 أثر الفحص على الاتصال")
 
-    # We only have disconnected list snapshot. If premise appears here, it's still disconnected.
-    # Approximate impact:
-    # - After inspection only (no maintenance) — cannot mark reconnected without a 'connected' dataset.
-    # - We will show counts that are still disconnected; impact can be extended if you provide a 'connected events' file.
-    st.info("الملاحظة: بما أن البيانات المتوفرة هي لقائمة (غير المتصلين) الحالية فقط، فالعداد الموجود هنا يُعتبر ما يزال غير متصل. لقياس الرجوع الفعلي للاتصال، نحتاج ملف (الأحداث/القراءات المتصلة) أو لقطات يومية للمقارنة.")
+    st.info("ملاحظة: بما أن البيانات المتوفرة هي لقائمة (غير المتصلين) الحالية فقط، فالعداد الموجود هنا يُعتبر ما يزال غير متصل. لقياس الرجوع الفعلي للاتصال نحتاج لقطات يومية أو ملف الأحداث المتصلة.")
 
-    # However, we can still show latency from insp to maintenance start:
     tmp = base[base["insp_done"] & base["has_mnt"]].copy()
     if not tmp.empty:
         st.markdown("### الفاصل الزمني بين إقفال الفحص وبداية الصيانة (أيام)")
-        days_hist = tmp["days_from_insp_to_mnt"].dropna()
-        if not days_hist.empty:
-            hist_df = pd.DataFrame({"days": days_hist})
-            st.bar_chart(hist_df.value_counts(bins=10).sort_index())
-            st.dataframe(tmp[["_KEY_PREMISE","insp_close","mnt_first_reg","days_from_insp_to_mnt"]]
-                            .sort_values("days_from_insp_to_mnt", ascending=False),
-                         use_container_width=True)
-        else:
-            st.info("لا توجد تواريخ كافية لحساب الفاصل الزمني.")
+        days = pd.to_numeric(tmp["days_from_insp_to_mnt"], errors="coerce").dropna()
+        safe_hist_bar(days, bins=12)
+
+        st.dataframe(
+            tmp[["_KEY_PREMISE","insp_close","mnt_first_reg","days_from_insp_to_mnt"]]
+              .sort_values("days_from_insp_to_mnt", ascending=False),
+            use_container_width=True
+        )
     else:
         st.info("لا توجد حالات بها فحص متبوع بصيانة لحساب الفاصل الزمني.")
 
 # ==================== Tab 4: Per-Premise Summary ====================
 with tab4:
     st.subheader("📚 ملخص لكل عداد غير متصل (مرات الفحص + الصيانة + السلال)")
-    # add per-prem filters
+
+    # Build per-premise
+    def per_premise_rollup_for_tab(insp_df, mnt_df, dis_df):
+        if insp_df.empty:
+            insp_by = pd.DataFrame(columns=["_KEY_PREMISE","insp_cnt","insp_open","insp_closed","insp_last_date","insp_buckets"])
+        else:
+            _i = insp_df.copy()
+            _i["_last_date"] = _i["_last"]
+            g = _i.groupby("_KEY_PREMISE")
+            insp_by = g.agg(
+                insp_cnt=(" _KEY_PREMISE".strip(), "count"),
+                insp_open=("_is_open", "sum"),
+                insp_last_date=("_last_date", "max")
+            ).reset_index()
+            insp_by["insp_closed"] = insp_by["insp_cnt"] - insp_by["insp_open"]
+            insp_buckets = g["bucket"].apply(lambda s: ", ".join(sorted(set(map(str, s))))).reset_index().rename(columns={"bucket":"insp_buckets"})
+            insp_by = insp_by.merge(insp_buckets, on="_KEY_PREMISE", how="left")
+
+        if mnt_df.empty:
+            mnt_by = pd.DataFrame(columns=["_KEY_PREMISE","mnt_cnt","mnt_open","mnt_closed","mnt_last_status","mnt_last_date","mnt_buckets"])
+        else:
+            _m = mnt_df.copy()
+            _m["_last_date"] = _m["_last"]
+            g = _m.groupby("_KEY_PREMISE")
+            mnt_by = g.agg(
+                mnt_cnt=(" _KEY_PREMISE".strip(), "count"),
+                mnt_open=("_is_open", "sum"),
+                mnt_last_date=("_last_date", "max")
+            ).reset_index()
+            mnt_by["mnt_closed"] = mnt_by["mnt_cnt"] - mnt_by["mnt_open"]
+            _m_sorted = _m.sort_values(["_KEY_PREMISE","_last_date","reg_time"], na_position="last")
+            last_idx = _m_sorted.groupby("_KEY_PREMISE").tail(1).index
+            last_slice = _m_sorted.loc[last_idx, ["_KEY_PREMISE","status"]].rename(columns={"status":"mnt_last_status"})
+            mnt_buckets = g["bucket"].apply(lambda s: ", ".join(sorted(set(map(str, s))))).reset_index().rename(columns={"bucket":"mnt_buckets"})
+            mnt_by = mnt_by.merge(last_slice, on="_KEY_PREMISE", how="left").merge(mnt_buckets, on="_KEY_PREMISE", how="left")
+
+        per_p = dis_df[["_KEY_PREMISE","LastDaily"]].drop_duplicates()
+        per_p = per_p.merge(insp_by, on="_KEY_PREMISE", how="left").merge(mnt_by, on="_KEY_PREMISE", how="left")
+        for col in ["insp_cnt","insp_open","insp_closed","mnt_cnt","mnt_open","mnt_closed"]:
+            if col in per_p.columns:
+                per_p[col] = pd.to_numeric(per_p[col], errors="coerce").fillna(0).astype(int)
+        per_p["has_insp"] = per_p["insp_cnt"].gt(0)
+        per_p["has_mnt"]  = per_p["mnt_cnt"].gt(0)
+        return per_p
+
+    per_prem_tab = per_premise_rollup_for_tab(insp_df, mnt_df, dis_df)
+
     fc1, fc2, fc3 = st.columns([2,2,2])
     with fc1:
         search_prem = st.text_input("🔎 ابحث عن Premise", value="")
     with fc2:
         f_has_mnt = st.selectbox("فلتر وجود صيانة", ["الكل", "يوجد صيانة", "لا يوجد صيانة"], index=0)
     with fc3:
-        all_buckets = sorted(set(", ".join(per_prem["mnt_buckets"].dropna().astype(str)).split(", "))) if "mnt_buckets" in per_prem.columns else []
+        all_buckets = sorted(set(", ".join(per_prem_tab["mnt_buckets"].dropna().astype(str)).split(", "))) if "mnt_buckets" in per_prem_tab.columns else []
         sel_buckets = st.multiselect("سلال الصيانة", options=[b for b in all_buckets if b], default=[])
 
-    fdf = per_prem.copy()
+    fdf = per_prem_tab.copy()
     if search_prem.strip():
         s = search_prem.strip()
         fdf = fdf[fdf["_KEY_PREMISE"].astype(str).str.contains(s, case=False, na=False)]
@@ -463,12 +500,10 @@ with tab4:
 with tab5:
     st.subheader("⬇️ تنزيل التقارير (Excel متعدد الأوراق)")
 
-    # Build the reports again to export
     r1 = base[(base["insp_done"]) & (~base["has_mnt"])].copy().sort_values(["insp_close"], ascending=[False])
     r2 = base[(base["insp_done"]) & (base["has_mnt"]) & (base["mnt_closed"])].copy().sort_values(["mnt_last_close","mnt_last_reg"], ascending=[False, False])
     r3 = base[(base["insp_done"]) & (base["mnt_open"])].copy().sort_values(["mnt_last_reg"], ascending=[False])
 
-    # Simple selections for export readability
     cols = ["_KEY_PREMISE","LastDaily",
             "insp_reg","insp_close","insp_status","insp_result","insp_bucket","insp_source",
             "mnt_first_reg","mnt_last_reg","mnt_last_close","mnt_last_status","mnt_last_result","mnt_last_bucket","mnt_last_source",
@@ -489,4 +524,4 @@ with tab5:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    st.caption("ملاحظة: وجود Premise ضمن (غير المتصلين) يعني أنه ما يزال غير متصل في لحظة إنشاء التقرير. لإثبات العودة للاتصال، نحتاج لقطات يومية للمقارنة أو ملف قراءات/اتصال.")
+    st.caption("وجود Premise ضمن (غير المتصلين) يعني أنه ما يزال غير متصل عند لحظة إنشاء التقرير. لإثبات العودة للاتصال بدقة نحتاج لقطات يومية/ملف قراءات متصلة.")
